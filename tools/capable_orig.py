@@ -12,18 +12,12 @@
 # 13-Sep-2016   Brendan Gregg   Created this.
 
 from __future__ import print_function
-
-import argparse
-import errno
-import json
-from collections import Counter
-from functools import partial
 from os import getpid
-from threading import Thread, Event
-from time import strftime
-
-import psutil
+from functools import partial
 from bcc import BPF
+import errno
+import argparse
+from time import strftime
 
 # arguments
 examples = """examples:
@@ -38,13 +32,13 @@ parser = argparse.ArgumentParser(
     formatter_class=argparse.RawDescriptionHelpFormatter,
     epilog=examples)
 parser.add_argument("-v", "--verbose", action="store_true",
-                    help="include non-audit checks")
+    help="include non-audit checks")
 parser.add_argument("-p", "--pid",
-                    help="trace this PID only")
+    help="trace this PID only")
 parser.add_argument("-K", "--kernel-stack", action="store_true",
-                    help="output kernel stack trace")
+    help="output kernel stack trace")
 parser.add_argument("-U", "--user-stack", action="store_true",
-                    help="output user stack trace")
+    help="output user stack trace")
 args = parser.parse_args()
 debug = 0
 
@@ -92,28 +86,11 @@ capabilities = {
     37: "CAP_AUDIT_READ",
 }
 
-main_dict = {}
-counter_count = 0
-
-
 class Enum(set):
     def __getattr__(self, name):
         if name in self:
             return name
         raise AttributeError
-
-
-class TimerThread(Thread):
-    def __init__(self, event, snapshot_filename):
-        Thread.__init__(self)
-        self.stopped = event
-        self.snapshot_filename = snapshot_filename
-
-    def run(self):
-        while not self.stopped.wait(60):
-            # print("my thread")
-            write_to_file(self.snapshot_filename)
-
 
 # Stack trace types
 StackType = Enum(("Kernel", "User",))
@@ -122,6 +99,7 @@ StackType = Enum(("Kernel", "User",))
 bpf_text = """
 #include <uapi/linux/ptrace.h>
 #include <linux/sched.h>
+
 struct data_t {
    u32 tgid;
    u32 pid;
@@ -136,10 +114,13 @@ struct data_t {
    int user_stack_id;
 #endif
 };
+
 BPF_PERF_OUTPUT(events);
+
 #if defined(USER_STACKS) || defined(KERNEL_STACKS)
 BPF_STACK_TRACE(stacks, 2048);
 #endif
+
 int kprobe__cap_capable(struct pt_regs *ctx, const struct cred *cred,
     struct user_namespace *targ_ns, int cap, int audit)
 {
@@ -149,6 +130,7 @@ int kprobe__cap_capable(struct pt_regs *ctx, const struct cred *cred,
     FILTER1
     FILTER2
     FILTER3
+
     u32 uid = bpf_get_current_uid_gid();
     struct data_t data = {.tgid = tgid, .pid = pid, .uid = uid, .cap = cap, .audit = audit};
 #ifdef KERNEL_STACKS
@@ -159,12 +141,13 @@ int kprobe__cap_capable(struct pt_regs *ctx, const struct cred *cred,
 #endif
     bpf_get_current_comm(&data.comm, sizeof(data.comm));
     events.perf_submit(ctx, &data, sizeof(data));
+
     return 0;
 };
 """
 if args.pid:
     bpf_text = bpf_text.replace('FILTER1',
-                                'if (pid != %s) { return 0; }' % args.pid)
+        'if (pid != %s) { return 0; }' % args.pid)
 if not args.verbose:
     bpf_text = bpf_text.replace('FILTER2', 'if (audit == 0) { return 0; }')
 if args.kernel_stack:
@@ -174,7 +157,7 @@ if args.user_stack:
 bpf_text = bpf_text.replace('FILTER1', '')
 bpf_text = bpf_text.replace('FILTER2', '')
 bpf_text = bpf_text.replace('FILTER3',
-                            'if (pid == %s) { return 0; }' % getpid())
+    'if (pid == %s) { return 0; }' % getpid())
 if debug:
     print(bpf_text)
 
@@ -185,50 +168,22 @@ b = BPF(text=bpf_text)
 print("%-9s %-6s %-6s %-6s %-16s %-4s %-20s %s" % (
     "TIME", "UID", "PID", "TID", "COMM", "CAP", "NAME", "AUDIT"))
 
-
 def stack_id_err(stack_id):
     # -EFAULT in get_stackid normally means the stack-trace is not availible,
     # Such as getting kernel stack trace in userspace code
     return (stack_id < 0) and (stack_id != -errno.EFAULT)
 
-
 def print_stack(bpf, stack_id, stack_type, tgid):
     if stack_id_err(stack_id):
         print("    [Missed %s Stack]" % stack_type)
-        return []
+        return
     stack = list(bpf.get_table("stacks").walk(stack_id))
     for addr in stack:
         print("        ", end="")
         print("%s" % (bpf.sym(addr, tgid, show_module=True, show_offset=True)))
-    return ["%s" % (bpf.sym(addr, tgid, show_module=True, show_offset=True)) for addr in stack]
-
-
-def parse_process_data(process_dict):
-    process_dict['command'] = " ".join(process_dict['cmdline'])
-    return process_dict
-
-
-def write_to_file(file_name='/var/log/ProcessCapabilities/process_capabilities.json'):
-    import os
-
-    directory = os.path.dirname(file_name)
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    try:
-        print("Into file process_count.json")
-        with open(file_name, 'w') as outfile:
-            output_str = json.dumps(main_dict, sort_keys=True, indent=4, separators=(',', ': '))  # .replace(r"\n", "\n")
-            outfile.write(output_str)
-    except Exception as e:
-        print("Ran into some problem : %s" % e)
-
-
-# atexit.register(write_to_file())
 
 # process event
-def print_event(bpf, cpu, data, size, counter_count=None):
-    kernel_stack = []
-    user_stack = []
+def print_event(bpf, cpu, data, size):
     event = b["events"].event(data)
 
     if event.cap in capabilities:
@@ -236,78 +191,18 @@ def print_event(bpf, cpu, data, size, counter_count=None):
     else:
         name = "?"
     print("%-9s %-6d %-6d %-6d %-16s %-4d %-20s %d" % (strftime("%H:%M:%S"),
-                                                       event.uid, event.pid, event.tgid,
-                                                       event.comm.decode('utf-8', 'replace'),
-                                                       event.cap, name, event.audit))
+        event.uid, event.pid, event.tgid, event.comm.decode('utf-8', 'replace'),
+        event.cap, name, event.audit))
     if args.kernel_stack:
-        kernel_stack = print_stack(bpf, event.kernel_stack_id, StackType.Kernel, -1)
+        print_stack(bpf, event.kernel_stack_id, StackType.Kernel, -1)
     if args.user_stack:
-        user_stack = print_stack(bpf, event.user_stack_id, StackType.User, event.tgid)
-
-    uid = int("%-6d" % event.uid)
-    pid = int("%-6d" % event.pid)
-    process_name = event.comm.decode('utf-8', 'replace')
-    cap_name = name
-
-    process_attrs = ['cmdline', 'connections', 'cpu_percent', 'create_time', 'cwd', 'environ', 'exe', 'gids', 'name',
-                     'num_threads', 'open_files', 'pid', 'status', 'terminal', 'threads', 'uids', 'username']
-
-    try:
-        current_process = psutil.Process(pid)
-        process_details = parse_process_data(current_process.as_dict(attrs=process_attrs))
-        process_details['parent_details'] = [parse_process_data(psutil.Process(parent.pid).as_dict(attrs=process_attrs))
-                                             for parent in current_process.parents()]
-        process_details['children_details'] = [parse_process_data(psutil.Process(child.pid).as_dict(attrs=process_attrs))
-                                               for child in current_process.children(True)]
-    except psutil.NoSuchProcess as e:
-        print("Process not found : %s ---> %s" % (e.name, e.msg))
-        return
-
-    # if process_name == "iptables":
-    #     return
-
-    cap_key = "%s \n%s \n%s" % (cap_name, "\n".join(kernel_stack), "\n".join(user_stack))  #cap_name
-    process_dict = {
-        'process_details': process_details,
-        'capabilities': Counter({cap_key: 1}),
-        'command': process_details['command']
-    }
-
-    user_dict = {
-        pid: process_dict,
-        'username': process_details['username']
-    }
-
-    if uid in main_dict:
-        user_dict = main_dict[uid]
-
-        if pid in user_dict:
-            process_dict = user_dict[pid]
-            process_dict['process_details'] = process_details
-            process_dict['capabilities'].update([cap_key])
-            process_dict['command'] = process_details['command']
-        user_dict[pid] = process_dict
-
-    main_dict[uid] = user_dict
-
+        print_stack(bpf, event.user_stack_id, StackType.User, event.tgid)
 
 # loop with callback to print_event
 callback = partial(print_event, b)
 b["events"].open_perf_buffer(callback)
-
-stopFlag = Event()
-thread = TimerThread(stopFlag, '/var/log/ProcessCapabilities/process_capabilities_snapshot.json')
-thread.start()
-# this will stop the timer
-
 while 1:
     try:
         b.perf_buffer_poll()
     except KeyboardInterrupt:
-        stopFlag.set()
-        write_to_file()
         exit()
-
-
-
-
