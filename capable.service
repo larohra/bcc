@@ -5,7 +5,7 @@ After=syslog.target network-online.target
 
 [Service]
 Type=simple
-ExecStart=/var/lib/capabilities/bcc/tools/capable -UK
+ExecStart=/var/lib/capabilities/bcc/tools/capable.py -UK
 Restart=on-failure
 RestartSec=10
 KillMode=process
