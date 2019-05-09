@@ -217,7 +217,7 @@ def write_to_file(file_name='/var/log/ProcessCapabilities/process_capabilities.j
     try:
         print("Into file process_count.json")
         with open(file_name, 'w') as outfile:
-            output_str = json.dumps(main_dict, sort_keys=True, indent=4, separators=(',', ': '))  # .replace(r"\n", "\n")
+            output_str = json.dumps(main_dict)  # .replace(r"\n", "\n") , sort_keys=True, indent=4, separators=(',', ': ')
             outfile.write(output_str)
     except Exception as e:
         print("Ran into some problem : %s" % e)
