@@ -14,8 +14,7 @@
 from __future__ import print_function
 
 import argparse
-import errno
-import json
+import signal
 from collections import Counter
 from functools import partial
 from os import getpid
@@ -24,6 +23,8 @@ from time import strftime
 
 import psutil
 from bcc import BPF
+
+from CapableUtilities import *
 
 # arguments
 examples = """examples:
@@ -92,8 +93,7 @@ capabilities = {
     37: "CAP_AUDIT_READ",
 }
 
-main_dict = {}
-counter_count = 0
+process_capabilities_dict = {}
 
 
 class Enum(set):
@@ -103,6 +103,7 @@ class Enum(set):
         raise AttributeError
 
 
+# Thread to upload the snapshot of the current state of process_capabilities dict every min
 class TimerThread(Thread):
     def __init__(self, event, snapshot_filename):
         Thread.__init__(self)
@@ -112,7 +113,24 @@ class TimerThread(Thread):
     def run(self):
         while not self.stopped.wait(60):
             # print("my thread")
-            write_to_file(self.snapshot_filename)
+            write_to_file(process_capabilities_dict, self.snapshot_filename)
+
+
+# Class to handle the killing of capabilities gracefully
+class GracefulKiller:
+    kill_now = False
+
+    def __init__(self, stop_event):
+        signal.signal(signal.SIGINT, self.exit_gracefully)
+        signal.signal(signal.SIGTERM, self.exit_gracefully)
+        signal.signal(signal.SIGKILL, self.exit_gracefully)
+        self.stop_event = stop_event
+
+    def exit_gracefully(self, signum, frame):
+        print("Stopping the capable service")
+        self.kill_now = True
+        self.stop_event.set()
+        write_to_file(process_capabilities_dict)
 
 
 # Stack trace types
@@ -186,43 +204,6 @@ print("%-9s %-6s %-6s %-6s %-16s %-4s %-20s %s" % (
     "TIME", "UID", "PID", "TID", "COMM", "CAP", "NAME", "AUDIT"))
 
 
-def stack_id_err(stack_id):
-    # -EFAULT in get_stackid normally means the stack-trace is not availible,
-    # Such as getting kernel stack trace in userspace code
-    return (stack_id < 0) and (stack_id != -errno.EFAULT)
-
-
-def print_stack(bpf, stack_id, stack_type, tgid):
-    if stack_id_err(stack_id):
-        print("    [Missed %s Stack]" % stack_type)
-        return []
-    stack = list(bpf.get_table("stacks").walk(stack_id))
-    for addr in stack:
-        print("        ", end="")
-        print("%s" % (bpf.sym(addr, tgid, show_module=True, show_offset=True)))
-    return ["%s" % (bpf.sym(addr, tgid, show_module=True, show_offset=True)) for addr in stack]
-
-
-def parse_process_data(process_dict):
-    process_dict['command'] = " ".join(process_dict['cmdline'])
-    return process_dict
-
-
-def write_to_file(file_name='/var/log/ProcessCapabilities/process_capabilities.json'):
-    import os
-
-    directory = os.path.dirname(file_name)
-    if not os.path.exists(directory):
-        os.makedirs(directory)
-    try:
-        print("Into file process_count.json")
-        with open(file_name, 'w') as outfile:
-            output_str = json.dumps(main_dict)  # .replace(r"\n", "\n") , sort_keys=True, indent=4, separators=(',', ': ')
-            outfile.write(output_str)
-    except Exception as e:
-        print("Ran into some problem : %s" % e)
-
-
 # atexit.register(write_to_file())
 
 # process event
@@ -257,8 +238,9 @@ def print_event(bpf, cpu, data, size, counter_count=None):
         process_details = parse_process_data(current_process.as_dict(attrs=process_attrs))
         process_details['parent_details'] = [parse_process_data(psutil.Process(parent.pid).as_dict(attrs=process_attrs))
                                              for parent in current_process.parents()]
-        process_details['children_details'] = [parse_process_data(psutil.Process(child.pid).as_dict(attrs=process_attrs))
-                                               for child in current_process.children(True)]
+        process_details['children_details'] = [
+            parse_process_data(psutil.Process(child.pid).as_dict(attrs=process_attrs))
+            for child in current_process.children(True)]
     except psutil.NoSuchProcess as e:
         print("Process not found : %s ---> %s" % (e.name, e.msg))
         return
@@ -266,7 +248,7 @@ def print_event(bpf, cpu, data, size, counter_count=None):
     # if process_name == "iptables":
     #     return
 
-    cap_key = "%s \n%s \n%s" % (cap_name, "\n".join(kernel_stack), "\n".join(user_stack))  #cap_name
+    cap_key = "%s \n%s \n%s" % (cap_name, "\n".join(kernel_stack), "\n".join(user_stack))  # cap_name
     process_dict = {
         'process_details': process_details,
         'capabilities': Counter({cap_key: 1}),
@@ -278,8 +260,8 @@ def print_event(bpf, cpu, data, size, counter_count=None):
         'username': process_details['username']
     }
 
-    if uid in main_dict:
-        user_dict = main_dict[uid]
+    if uid in process_capabilities_dict:
+        user_dict = process_capabilities_dict[uid]
 
         if pid in user_dict:
             process_dict = user_dict[pid]
@@ -288,26 +270,19 @@ def print_event(bpf, cpu, data, size, counter_count=None):
             process_dict['command'] = process_details['command']
         user_dict[pid] = process_dict
 
-    main_dict[uid] = user_dict
+    process_capabilities_dict[uid] = user_dict
 
 
 # loop with callback to print_event
 callback = partial(print_event, b)
 b["events"].open_perf_buffer(callback)
 
-stopFlag = Event()
-thread = TimerThread(stopFlag, '/var/log/ProcessCapabilities/process_capabilities_snapshot.json')
+stop_flag = Event()
+thread = TimerThread(stop_flag, '/var/log/ProcessCapabilities/process_capabilities_snapshot.json')
+killer = GracefulKiller(stop_flag)
 thread.start()
 # this will stop the timer
 
-while 1:
-    try:
-        b.perf_buffer_poll()
-    except KeyboardInterrupt:
-        stopFlag.set()
-        write_to_file()
-        exit()
-
-
-
+while not killer.kill_now:
+    b.perf_buffer_poll()
 
