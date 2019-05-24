@@ -20,7 +20,7 @@ from functools import partial
 from Queue import Queue
 from os import getpid
 from threading import Thread, Event
-from time import strftime
+from time import strftime, time, sleep
 
 import psutil
 from bcc import BPF
@@ -67,29 +67,7 @@ class GracefulKiller:
 
 
 # process event
-def parse_event(event):
-    kernel_stack = []
-    user_stack = []
-    # event = bpf["events"].event(data)
-
-    if event.cap in capabilities:
-        name = capabilities[event.cap]
-    else:
-        name = "?"
-    print("%-9s %-6d %-6d %-6d %-16s %-4d %-20s %d" % (strftime("%H:%M:%S"),
-                                                       event.uid, event.pid, event.tgid,
-                                                       event.comm.decode('utf-8', 'replace'),
-                                                       event.cap, name, event.audit))
-    if args.kernel_stack:
-        kernel_stack = print_stack(bpf, event.kernel_stack_id, StackType.Kernel, -1)
-    if args.user_stack:
-        user_stack = print_stack(bpf, event.user_stack_id, StackType.User, event.tgid)
-
-    uid = int("%-6d" % event.uid)
-    pid = int("%-6d" % event.pid)
-    process_name = event.comm.decode('utf-8', 'replace')
-    cap_name = name
-
+def fetch_process_details(pid):
     process_attrs = ['cmdline', 'connections', 'cpu_percent', 'create_time', 'cwd', 'environ', 'exe', 'gids', 'name',
                      'num_threads', 'open_files', 'pid', 'status', 'terminal', 'threads', 'uids', 'username']
 
@@ -100,34 +78,76 @@ def parse_event(event):
                                              for parent in current_process.parents()]
         process_details['children_details'] = [
             parse_process_data(psutil.Process(child.pid).as_dict(attrs=process_attrs))
-            for child in current_process.children(True)]
+            for child in current_process.children(True)
+        ]
+        return process_details
     except psutil.NoSuchProcess as e:
         print("Process not found : %s ---> %s" % (e.name, e.msg))
         return
 
-    cap_key = "%s \n%s \n%s" % (cap_name, "\n".join(kernel_stack), "\n".join(user_stack))  # cap_name
-    process_dict = {
-        'process_details': process_details,
-        'capabilities': Counter({cap_key: 1}),
-        'command': process_details['command']
-    }
 
-    user_dict = {
-        pid: process_dict,
-        'username': process_details['username']
-    }
+def parse_bpf(bpf, cpu, data, size):
+    event = bpf["events"].event(data)
+    process_capabilities_dict['total_task_count'].update(['count'])
+    parse_event(event)
+
+
+def parse_event(event):
+    process_capabilities_dict['total_task_count'].update(['count'])
+
+    kernel_stack = []
+    user_stack = []
+    # event = bpf["events"].event(data)
+
+    if event.cap in capabilities:
+        name = capabilities[event.cap]
+    else:
+        name = "?"
+    # print("%-9s %-6d %-6d %-6d %-16s %-4d %-20s %d" % (strftime("%H:%M:%S"),
+    #                                                    event.uid, event.pid, event.tgid,
+    #                                                    event.comm.decode('utf-8', 'replace'),
+    #                                                    event.cap, name, event.audit))
+    if args.kernel_stack:
+        kernel_stack = print_stack(bpf, event.kernel_stack_id, StackType.Kernel, -1)
+    if args.user_stack:
+        user_stack = print_stack(bpf, event.user_stack_id, StackType.User, event.tgid)
+
+    uid = int("%-6d" % event.uid)
+    pid = int("%-6d" % event.pid)
+    # process_name = event.comm.decode('utf-8', 'replace')
+
+    cap_key = "%s \n%s \n%s" % (name, "\n".join(kernel_stack), "\n".join(user_stack))  # cap_name
 
     if uid in process_capabilities_dict:
         user_dict = process_capabilities_dict[uid]
 
         if pid in user_dict:
             process_dict = user_dict[pid]
-            process_dict['process_details'] = process_details
             process_dict['capabilities'].update([cap_key])
-            process_dict['command'] = process_details['command']
-        user_dict[pid] = process_dict
+        else:
+            process_details = fetch_process_details(pid)
+            process_dict = {
+                'process_details': process_details,
+                'capabilities': Counter({cap_key: 1}),
+                'command': process_details['command']
+            }
 
-    process_capabilities_dict[uid] = user_dict
+        user_dict.update({pid: process_dict})
+
+    else:
+        process_details = fetch_process_details(pid)
+        process_dict = {
+            'process_details': process_details,
+            'capabilities': Counter({cap_key: 1}),
+            'command': process_details['command']
+        }
+
+        user_dict = {
+            pid: process_dict,
+            'username': process_details['username']
+        }
+
+    process_capabilities_dict.update({uid: user_dict})
 
 
 def add_event_to_queue(bpf, cpu, data, size):
@@ -203,9 +223,22 @@ def setup_bpf():
             return 0;
         };
         """
-    if args.pid:
-        bpf_text = bpf_text.replace('FILTER1',
-                                    'if (pid != %s) { return 0; }' % args.pid)
+
+    pids = []
+    while len(pids) < 1:
+        try:
+            with open('/sys/fs/cgroup/memory/system.slice/walinuxagent.service/cgroup.procs') as f:
+                pids = f.readlines()
+                print("Found agent service pids - %s" % pids)
+            # you may also want to remove whitespace characters like `\n` at the end of each line
+            pids = [pid.strip() for pid in pids]
+        except:
+            print("Agent service not started, retying in 5 secs")
+            sleep(5)
+            continue
+
+    bpf_text = bpf_text.replace('FILTER1', 'if (!(%s)) { return 0; }' % ' || '.join(['pid == %s' % pid for pid in pids]))
+
     if not args.verbose:
         bpf_text = bpf_text.replace('FILTER2', 'if (audit == 0) { return 0; }')
     if args.kernel_stack:
@@ -223,13 +256,13 @@ def setup_bpf():
     bpf = BPF(text=bpf_text)
 
     # header
-    print("%-9s %-6s %-6s %-6s %-16s %-4s %-20s %s" % (
-        "TIME", "UID", "PID", "TID", "COMM", "CAP", "NAME", "AUDIT"))
+    # print("%-9s %-6s %-6s %-6s %-16s %-4s %-20s %s" % (
+    #     "TIME", "UID", "PID", "TID", "COMM", "CAP", "NAME", "AUDIT"))
 
     # atexit.register(write_to_file())
 
     # loop with callback to print_event
-    callback = partial(add_event_to_queue, bpf)
+    callback = partial(add_event_to_queue, bpf)  #
     bpf["events"].open_perf_buffer(callback)
 
     return bpf
@@ -239,7 +272,10 @@ def orchestrator(thread_killer):
     while not thread_killer.kill_now or task_queue.not_empty:
         if task_queue.not_empty:
             event = task_queue.get()
-            parse_event(event)
+            try:
+                parse_event(event)
+            except:
+                print("Ran into error")
             task_queue.task_done()
 
 
@@ -287,7 +323,7 @@ capabilities = {
     37: "CAP_AUDIT_READ",
 }
 
-process_capabilities_dict = {}
+process_capabilities_dict = {'total_task_count': Counter({'count': 0})}
 task_queue = Queue()
 
 if __name__ == "__main__":
@@ -311,6 +347,7 @@ if __name__ == "__main__":
     for i in range(num_orchestrator_threads):
         t = Thread(target=orchestrator, args=(killer,))
         t.daemon = True
+        print("Started the orchestrator thread")
         t.start()
 
     while not killer.kill_now:

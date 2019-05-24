@@ -1,5 +1,6 @@
 from __future__ import print_function
 
+
 # Utilities Function
 def stack_id_err(stack_id):
     import errno
@@ -14,9 +15,9 @@ def print_stack(bpf, stack_id, stack_type, tgid):
         print("    [Missed %s Stack]" % stack_type)
         return []
     stack = list(bpf.get_table("stacks").walk(stack_id))
-    for addr in stack:
-        print("        ", end="")
-        print("%s" % (bpf.sym(addr, tgid, show_module=True, show_offset=True)))
+    # for addr in stack:
+    #     print("        ", end="")
+    #     print("%s" % (bpf.sym(addr, tgid, show_module=True, show_offset=True)))
     return ["%s" % (bpf.sym(addr, tgid, show_module=True, show_offset=True)) for addr in stack]
 
 
