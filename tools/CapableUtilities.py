@@ -1,6 +1,7 @@
 from __future__ import print_function
+import os
 
-from capable import LOG_PATH, logger
+LOG_PATH = "/var/log/ProcessCapabilities/"
 
 
 # Utilities Function
@@ -11,7 +12,7 @@ def stack_id_err(stack_id):
     return (stack_id < 0) and (stack_id != -errno.EFAULT)
 
 
-def print_stack(bpf, stack_id, stack_type, tgid):
+def print_stack(bpf, stack_id, stack_type, tgid, logger):
     if stack_id_err(stack_id):
         logger.warning("    [Missed %s Stack]", stack_type)
         return []
@@ -27,13 +28,16 @@ def parse_process_data(process_dict):
     return process_dict
 
 
-def write_to_file(main_dict, file_name=LOG_PATH + 'process_capabilities.json'):
-    import os
-    import json
-
+def create_dir_if_not_exists(file_name):
     directory = os.path.dirname(file_name)
     if not os.path.exists(directory):
         os.makedirs(directory)
+
+
+def write_to_file(main_dict, file_name=os.path.join(LOG_PATH, 'process_capabilities.json')):
+    import json
+    create_dir_if_not_exists(file_name)
+
     try:
         with open(file_name, 'w') as outfile:
             output_str = json.dumps(

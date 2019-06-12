@@ -62,7 +62,7 @@ class GracefulKiller:
         self.stop_event = stop_event
 
     def exit_gracefully(self, signum, frame):
-        logger.debug("Stopping the capable service")
+        logger.warning("Stopping the capable service")
         self.kill_now = True
         self.stop_event.set()
         write_to_file(process_capabilities_dict)
@@ -112,9 +112,9 @@ def parse_event(event):
     #                                                    event.comm.decode('utf-8', 'replace'),
     #                                                    event.cap, name, event.audit))
     if args.kernel_stack:
-        kernel_stack = print_stack(bpf, event.kernel_stack_id, StackType.Kernel, -1)
+        kernel_stack = print_stack(bpf, event.kernel_stack_id, StackType.Kernel, -1, logger)
     if args.user_stack:
-        user_stack = print_stack(bpf, event.user_stack_id, StackType.User, event.tgid)
+        user_stack = print_stack(bpf, event.user_stack_id, StackType.User, event.tgid, logger)
 
     uid = int("%-6d" % event.uid)
     pid = int("%-6d" % event.pid)
@@ -285,9 +285,11 @@ def orchestrator(thread_killer):
 
 def get_and_set_logger():
     _logger = logging.getLogger(__name__)
+    log_file = os.path.join(LOG_PATH, 'capabilities.log')
 
     c_handler = logging.StreamHandler()
-    f_handler = logging.FileHandler(LOG_PATH + 'capabilities.log')
+    create_dir_if_not_exists(log_file)
+    f_handler = logging.FileHandler(log_file)
     c_handler.setLevel(logging.DEBUG)
     f_handler.setLevel(logging.WARNING)
 
@@ -299,7 +301,7 @@ def get_and_set_logger():
     _logger.addHandler(c_handler)
     _logger.addHandler(f_handler)
 
-    _logger.setLevel(logging.INFO)
+    _logger.setLevel(logging.DEBUG)
 
     return _logger
 
@@ -350,7 +352,6 @@ capabilities = {
 
 process_capabilities_dict = {'total_task_count': Counter({'count': 0})}
 task_queue = Queue()
-LOG_PATH = "/var/log/ProcessCapabilities/"
 
 logger = get_and_set_logger()
 
@@ -368,7 +369,7 @@ if __name__ == "__main__":
 
     # Set the threads and start execution
     stop_flag = Event()
-    snapshot_thread = TimerThread(stop_flag, LOG_PATH+'process_capabilities_snapshot.json')
+    snapshot_thread = TimerThread(stop_flag, os.path.join(LOG_PATH, 'process_capabilities_snapshot.json'))
     killer = GracefulKiller(stop_flag)  # type: GracefulKiller
     snapshot_thread.start()
 
@@ -376,6 +377,7 @@ if __name__ == "__main__":
         t = Thread(target=orchestrator, args=(killer,))
         t.daemon = True
         print("Started the orchestrator thread")
+        logger.warning("starting the orchestrator thread")
         t.start()
 
     while not killer.kill_now:
