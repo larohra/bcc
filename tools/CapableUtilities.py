@@ -1,5 +1,7 @@
 from __future__ import print_function
 
+from capable import LOG_PATH, logger
+
 
 # Utilities Function
 def stack_id_err(stack_id):
@@ -10,9 +12,8 @@ def stack_id_err(stack_id):
 
 
 def print_stack(bpf, stack_id, stack_type, tgid):
-
     if stack_id_err(stack_id):
-        print("    [Missed %s Stack]" % stack_type)
+        logger.warning("    [Missed %s Stack]", stack_type)
         return []
     stack = list(bpf.get_table("stacks").walk(stack_id))
     # for addr in stack:
@@ -26,7 +27,7 @@ def parse_process_data(process_dict):
     return process_dict
 
 
-def write_to_file(main_dict, file_name='/var/log/ProcessCapabilities/process_capabilities.json'):
+def write_to_file(main_dict, file_name=LOG_PATH + 'process_capabilities.json'):
     import os
     import json
 

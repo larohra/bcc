@@ -20,12 +20,14 @@ from functools import partial
 from Queue import Queue
 from os import getpid
 from threading import Thread, Event
-from time import strftime, time, sleep
+from time import sleep
 
 import psutil
 from bcc import BPF
 
 from CapableUtilities import *
+
+import logging
 
 
 class Enum(set):
@@ -39,6 +41,7 @@ class Enum(set):
 class TimerThread(Thread):
     def __init__(self, event, snapshot_filename):
         Thread.__init__(self)
+        logger.debug("Timer thread started")
         self.stopped = event
         self.snapshot_filename = snapshot_filename
 
@@ -59,9 +62,10 @@ class GracefulKiller:
         self.stop_event = stop_event
 
     def exit_gracefully(self, signum, frame):
-        print("Stopping the capable service")
+        logger.debug("Stopping the capable service")
         self.kill_now = True
         self.stop_event.set()
+        write_to_file(process_capabilities_dict)
         task_queue.join()
         write_to_file(process_capabilities_dict)
 
@@ -82,7 +86,7 @@ def fetch_process_details(pid):
         ]
         return process_details
     except psutil.NoSuchProcess as e:
-        print("Process not found : %s ---> %s" % (e.name, e.msg))
+        logger.warning("Process not found : %s ---> %s", e.name, e.msg, exc_info=True)
         return
 
 
@@ -100,9 +104,9 @@ def parse_event(event):
     # event = bpf["events"].event(data)
 
     if event.cap in capabilities:
-        name = capabilities[event.cap]
+        cap_name = capabilities[event.cap]
     else:
-        name = "?"
+        cap_name = "?"
     # print("%-9s %-6d %-6d %-6d %-16s %-4d %-20s %d" % (strftime("%H:%M:%S"),
     #                                                    event.uid, event.pid, event.tgid,
     #                                                    event.comm.decode('utf-8', 'replace'),
@@ -116,7 +120,7 @@ def parse_event(event):
     pid = int("%-6d" % event.pid)
     # process_name = event.comm.decode('utf-8', 'replace')
 
-    cap_key = "%s \n%s \n%s" % (name, "\n".join(kernel_stack), "\n".join(user_stack))  # cap_name
+    cap_key = "%s \n%s \n%s" % (cap_name, "\n".join(kernel_stack), "\n".join(user_stack))  # cap_name
 
     if uid in process_capabilities_dict:
         user_dict = process_capabilities_dict[uid]
@@ -133,7 +137,6 @@ def parse_event(event):
             }
 
         user_dict.update({pid: process_dict})
-
     else:
         process_details = fetch_process_details(pid)
         process_dict = {
@@ -147,6 +150,7 @@ def parse_event(event):
             'username': process_details['username']
         }
 
+    logger.debug("Command: %s; Capability: %s", user_dict[pid]['command'], cap_name)
     process_capabilities_dict.update({uid: user_dict})
 
 
@@ -229,11 +233,11 @@ def setup_bpf():
         try:
             with open('/sys/fs/cgroup/memory/system.slice/walinuxagent.service/cgroup.procs') as f:
                 pids = f.readlines()
-                print("Found agent service pids - %s" % pids)
+                logger.warning("Found agent service pids - %s", pids)
             # you may also want to remove whitespace characters like `\n` at the end of each line
             pids = [pid.strip() for pid in pids]
         except:
-            print("Agent service not started, retying in 5 secs")
+            logger.warning("Agent service not started, retying in 5 secs")
             sleep(5)
             continue
 
@@ -274,9 +278,30 @@ def orchestrator(thread_killer):
             event = task_queue.get()
             try:
                 parse_event(event)
-            except:
-                print("Ran into error")
+            except Exception as e:
+                logger.exception("Ran into error in orchestrator")
             task_queue.task_done()
+
+
+def get_and_set_logger():
+    _logger = logging.getLogger(__name__)
+
+    c_handler = logging.StreamHandler()
+    f_handler = logging.FileHandler(LOG_PATH + 'capabilities.log')
+    c_handler.setLevel(logging.DEBUG)
+    f_handler.setLevel(logging.WARNING)
+
+    c_format = logging.Formatter('%(name)s - %(levelname)s - %(message)s')
+    f_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+    c_handler.setFormatter(c_format)
+    f_handler.setFormatter(f_format)
+
+    _logger.addHandler(c_handler)
+    _logger.addHandler(f_handler)
+
+    _logger.setLevel(logging.INFO)
+
+    return _logger
 
 
 # capabilities to names, generated from (and will need updating):
@@ -325,6 +350,9 @@ capabilities = {
 
 process_capabilities_dict = {'total_task_count': Counter({'count': 0})}
 task_queue = Queue()
+LOG_PATH = "/var/log/ProcessCapabilities/"
+
+logger = get_and_set_logger()
 
 if __name__ == "__main__":
     debug = 0
@@ -340,7 +368,7 @@ if __name__ == "__main__":
 
     # Set the threads and start execution
     stop_flag = Event()
-    snapshot_thread = TimerThread(stop_flag, '/var/log/ProcessCapabilities/process_capabilities_snapshot.json')
+    snapshot_thread = TimerThread(stop_flag, LOG_PATH+'process_capabilities_snapshot.json')
     killer = GracefulKiller(stop_flag)  # type: GracefulKiller
     snapshot_thread.start()
 
